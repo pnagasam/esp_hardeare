@@ -1,36 +1,33 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
+#include "esp_mac.h"
 #include "nvs_flash.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 
 static const char *TAG = "rx";
 
-#define AP_SSID     "esp-beacon"
+#define AP_SSID     "priyanka wifi"
+#define AP_CHAN     1
 #define BEACON_PORT 5000
-
-static EventGroupHandle_t wifi_evt;
-#define GOT_IP_BIT BIT0
 
 static uint32_t csi_count    = 0;
 static uint32_t beacon_count = 0;
 
 static void event_handler(void *arg, esp_event_base_t base,
                           int32_t id, void *data) {
-    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGW(TAG, "disconnected, reconnecting...");
-        esp_wifi_connect();
-    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        xEventGroupSetBits(wifi_evt, GOT_IP_BIT);
+    if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t *evt = (wifi_event_ap_staconnected_t *)data;
+        ESP_LOGI(TAG, "STA connected: " MACSTR, MAC2STR(evt->mac));
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t *evt = (wifi_event_ap_stadisconnected_t *)data;
+        ESP_LOGI(TAG, "STA disconnected: " MACSTR, MAC2STR(evt->mac));
     }
 }
 
@@ -44,18 +41,18 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info) {
     int64_t ts = esp_timer_get_time();
     const int8_t *csi = info->buf;
     uint16_t len = info->len;
-    printf("CSI,%lld,%d,%d,%d,%u,"
+    printf("CSI,%lld,%d,%d,%d,%d,%d,%d,%u,"
            "%02X:%02X:%02X:%02X:%02X:%02X,",
            ts, info->rx_ctrl.rssi, info->rx_ctrl.rate,
-           info->rx_ctrl.channel, len,
+           info->rx_ctrl.sig_mode, info->rx_ctrl.cwb,
+           info->rx_ctrl.mcs, info->rx_ctrl.channel, len,
            info->mac[0], info->mac[1], info->mac[2],
            info->mac[3], info->mac[4], info->mac[5]);
-    
+
     for (uint16_t i = 0; i < len; i++) {
       printf("%d%c", csi[i], (i + 1 == len) ? '\n' : ' ');
     }
     csi_count++;
-
 }
 
 static void udp_recv_task(void *arg) {
@@ -80,51 +77,44 @@ static void udp_recv_task(void *arg) {
 
     char buf[64];
     while (1) {
-        int len = recv(sock, buf, sizeof(buf), 0);
+        int len = recv(sock, buf, sizeof(buf) - 1, 0);
         if (len > 0) {
-          printf("Got UDP Beacon\n");
+            buf[len] = '\0';
+            printf("Got UDP Beacon: %s\n", buf);
             beacon_count++;
         }
     }
 }
 
-static void wifi_init_sta(void) {
-    wifi_evt = xEventGroupCreate();
+static void wifi_init_ap(void) {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
     esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    esp_event_handler_instance_t h1, h2;
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, &h1));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &h2));
+        WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, NULL));
 
-    wifi_config_t sta = {
-        .sta = {
-            .ssid = AP_SSID,
-            .threshold.authmode = WIFI_AUTH_OPEN,
-        },
-    };
     wifi_config_t ap = {
         .ap = {
-            .ssid           = "esp-rx-dummy",
-            .ssid_len       = strlen("esp-rx-dummy"),
-            .channel        = 1,
-            .max_connection = 1,
+            .ssid           = AP_SSID,
+            .ssid_len       = strlen(AP_SSID),
+            .channel        = AP_CHAN,
+            .max_connection = 4,
             .authmode       = WIFI_AUTH_OPEN,
         },
     };
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
-    ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW40));
-    ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW40));
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_AP,
+        WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N));
+    ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW40));
+    ESP_ERROR_CHECK(esp_wifi_set_channel(AP_CHAN, WIFI_SECOND_CHAN_ABOVE));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
     wifi_promiscuous_filter_t filter = {
         .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT
@@ -147,11 +137,8 @@ static void wifi_init_sta(void) {
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&csi_cb, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_csi_config(&csi_cfg));
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
-    ESP_LOGI(TAG, "CSI armed; connecting to %s...", AP_SSID);
 
-    xEventGroupWaitBits(wifi_evt, GOT_IP_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
-    ESP_LOGI(TAG, "connected");
+    ESP_LOGI(TAG, "softAP '%s' up on ch %d (HT40+)", AP_SSID, AP_CHAN);
 }
 
 static void heartbeat_task(void *arg) {
@@ -164,7 +151,7 @@ static void heartbeat_task(void *arg) {
 
 void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
-    wifi_init_sta();
-    xTaskCreate(udp_recv_task,  "udp_rx",    4096, NULL, 5, NULL);
-    xTaskCreate(heartbeat_task, "hb",        2048, NULL, 3, NULL);
+    wifi_init_ap();
+    xTaskCreate(udp_recv_task,  "udp_rx", 4096, NULL, 5, NULL);
+    xTaskCreate(heartbeat_task, "hb",     2048, NULL, 3, NULL);
 }
