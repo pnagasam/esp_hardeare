@@ -12,8 +12,8 @@
 
 static const char *TAG = "tx";
 
-#define AP_SSID        "priyanka wifi"
-#define BEACON_RATE_MS 50
+#define AP_SSID        "priyanka incorporated"
+#define BEACON_RATE_MS 2
 #define BEACON_PORT    5000
 #define BEACON_PAYLOAD "beacon test"
 
@@ -31,6 +31,8 @@ static void event_handler(void *arg, esp_event_base_t base,
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *evt = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "got IP: " IPSTR, IP2STR(&evt->ip_info.ip));
+        /* re-assert HT40 after association so it isn't overridden */
+        esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW40);
         xEventGroupSetBits(wifi_evt, CONNECTED_BIT);
     }
 }
@@ -93,10 +95,11 @@ static void beacon_task(void *arg) {
             if (ret < 0) {
                 ESP_LOGE(TAG, "sendto failed: %d", errno);
             } else {
-              ESP_LOGI(TAG, "I sent a packet...");
+              //ESP_LOGI(TAG, "I sent a packet...");
             }
         }
-        vTaskDelayUntil(&tick_start, pdMS_TO_TICKS(BEACON_RATE_MS));
+        //vTaskDelayUntil(&tick_start, pdMS_TO_TICKS(BEACON_RATE_MS));
+	vTaskDelay(1);
     }
 }
 
