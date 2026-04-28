@@ -12,13 +12,16 @@
 #include "nvs_flash.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
+#include "led_strip.h"
 
 static const char *TAG = "rx";
+
+#define WS2812_GPIO 48
 
 #define AP_SSID     "priyanka incorporated"
 #define AP_CHAN     11
 #define BEACON_PORT 5000
-#define CSI_QUEUE_LEN 20
+#define CSI_QUEUE_LEN 200
 #define CSI_MAX_LEN   384
 
 static uint32_t csi_count    = 0;
@@ -73,26 +76,47 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info) {
     csi_count++;
 }
 
+/* Binary packet header — packed so Python struct.unpack sees no padding.
+ * Wire layout: magic(2) seq(2) ts(8) rssi(1) rate(1) sig_mode(1) cwb(1)
+ *              mcs(1) channel(1) mac(6) data_len(2)  = 26 bytes
+ * Followed immediately by data_len bytes of raw int8 CSI samples. */
+typedef struct __attribute__((packed)) {
+    uint8_t  magic[2];
+    uint16_t seq;
+    int64_t  ts;
+    int8_t   rssi;
+    uint8_t  rate;
+    uint8_t  sig_mode;
+    uint8_t  cwb;
+    uint8_t  mcs;
+    uint8_t  channel;
+    uint8_t  mac[6];
+    uint16_t data_len;
+} csi_bin_hdr_t;
+
 static void csi_print_task(void *arg) {
-    /* stack-allocated buffer big enough for header + worst-case CSI values */
-    static char line[CSI_MAX_LEN * 5 + 200];
+    static uint8_t outbuf[sizeof(csi_bin_hdr_t) + CSI_MAX_LEN];
     csi_queued_t item;
+    uint16_t seq = 0;
+
     while (1) {
-        if (xQueueReceive(csi_queue, &item, portMAX_DELAY) == pdTRUE) {
-            int pos = snprintf(line, sizeof(line),
-                "CSI,%lld,%d,%d,%d,%d,%d,%d,%u,%u,"
-                "%02X:%02X:%02X:%02X:%02X:%02X,",
-                item.ts, item.rssi, item.rate,
-                item.sig_mode, item.cwb,
-                item.mcs, item.channel, item.len, item.len / 2,
-                item.mac[0], item.mac[1], item.mac[2],
-                item.mac[3], item.mac[4], item.mac[5]);
-            for (uint16_t i = 0; i < item.len; i++) {
-                pos += snprintf(line + pos, sizeof(line) - pos,
-				"%02X%c", (uint8_t)item.buf[i], (i + 1 == item.len) ? '\n' : ' ');
-            }
-            fputs(line, stdout);
-        }
+        if (xQueueReceive(csi_queue, &item, portMAX_DELAY) != pdTRUE) continue;
+
+        csi_bin_hdr_t *hdr = (csi_bin_hdr_t *)outbuf;
+        hdr->magic[0] = 0xAA;
+        hdr->magic[1] = 0x55;
+        hdr->seq      = seq++;
+        hdr->ts       = item.ts;
+        hdr->rssi     = item.rssi;
+        hdr->rate     = item.rate;
+        hdr->sig_mode = item.sig_mode;
+        hdr->cwb      = item.cwb;
+        hdr->mcs      = item.mcs;
+        hdr->channel  = item.channel;
+        memcpy(hdr->mac, item.mac, 6);
+        hdr->data_len = item.len;
+        memcpy(outbuf + sizeof(csi_bin_hdr_t), item.buf, item.len);
+        fwrite(outbuf, 1, sizeof(csi_bin_hdr_t) + item.len, stdout);
     }
 }
 
@@ -159,8 +183,27 @@ static void heartbeat_task(void *arg) {
     }
 }
 
+static void init_led(void) {
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = WS2812_GPIO,
+        .max_leds = 1,
+        .led_model = LED_MODEL_WS2812,
+    };
+    led_strip_rmt_config_t rmt_config = {
+        .resolution_hz = 10 * 1000 * 1000, // 10 MHz
+    };
+    led_strip_handle_t led;
+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led));
+
+    // RX = MUSTARD YELLOW
+    ESP_ERROR_CHECK(led_strip_set_pixel(led, 0, 204, 153, 0));
+    ESP_ERROR_CHECK(led_strip_refresh(led));
+    ESP_LOGI(TAG, "LED set to MUSTARD YELLOW (RX)");
+}
+
 void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
+    init_led();
     csi_queue = xQueueCreate(CSI_QUEUE_LEN, sizeof(csi_queued_t));
     wifi_init_ap();
     xTaskCreate(csi_print_task, "csi_pr", 8192, NULL, 4, NULL);

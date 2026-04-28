@@ -9,16 +9,20 @@
 #include "nvs_flash.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
+#include "led_strip.h"
 
 static const char *TAG = "tx";
 
+#define WS2812_GPIO 48
+
 #define AP_SSID        "priyanka incorporated"
-#define BEACON_RATE_MS 2
 #define BEACON_PORT    5000
 #define BEACON_PAYLOAD "beacon test"
 
 static EventGroupHandle_t wifi_evt;
 #define CONNECTED_BIT BIT0
+
+#define BEACON_RATE_MS 5   // 500 Hz
 
 static void event_handler(void *arg, esp_event_base_t base,
                           int32_t id, void *data) {
@@ -76,6 +80,7 @@ static void beacon_task(void *arg) {
         vTaskDelete(NULL);
         return;
     }
+
     int bcast = 1;
     if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &bcast, sizeof(bcast)) < 0) {
         ESP_LOGE(TAG, "set SO_BROADCAST failed: %d", errno);
@@ -87,24 +92,43 @@ static void beacon_task(void *arg) {
         .sin_addr.s_addr = htonl(INADDR_BROADCAST),
     };
 
-    TickType_t tick_start = xTaskGetTickCount();
     while (1) {
+        vTaskDelay(pdMS_TO_TICKS(BEACON_RATE_MS));
+
         if (xEventGroupGetBits(wifi_evt) & CONNECTED_BIT) {
             int ret = sendto(sock, BEACON_PAYLOAD, strlen(BEACON_PAYLOAD), 0,
                              (struct sockaddr *)&dest, sizeof(dest));
+
             if (ret < 0) {
                 ESP_LOGE(TAG, "sendto failed: %d", errno);
             } else {
-              //ESP_LOGI(TAG, "I sent a packet...");
+                ESP_LOGI(TAG, "packet sent at %lu ms", xTaskGetTickCount() * portTICK_PERIOD_MS);
             }
         }
-        //vTaskDelayUntil(&tick_start, pdMS_TO_TICKS(BEACON_RATE_MS));
-	vTaskDelay(1);
     }
+}
+
+static void init_led(void) {
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = WS2812_GPIO,
+        .max_leds = 1,
+        .led_model = LED_MODEL_WS2812,
+    };
+    led_strip_rmt_config_t rmt_config = {
+        .resolution_hz = 10 * 1000 * 1000, // 10 MHz
+    };
+    led_strip_handle_t led;
+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led));
+
+    // TX = ORANGE
+    ESP_ERROR_CHECK(led_strip_set_pixel(led, 0, 255, 80, 0));
+    ESP_ERROR_CHECK(led_strip_refresh(led));
+    ESP_LOGI(TAG, "LED set to ORANGE (TX)");
 }
 
 void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
+    init_led();
     wifi_init_sta();
     xTaskCreate(beacon_task, "beacon", 4096, NULL, 5, NULL);
 }
